@@ -16,6 +16,7 @@ Commands:
   list                   List current windows in the session
   status                 Show status of all workstreams
   combine <branch>       Merge all worktrees into a new branch and start Claude
+  clean                  Remove all worktrees and associated branches for this session
   stop                   Kill the session
   watch                  Start a background watchdog (notifies on input/done/error)
 
@@ -32,7 +33,7 @@ get_status() {
     # Capture more lines to be sure we see the stopped message
     local content=$(tmux capture-pane -pt "$SESSION:$idx" -S -10)
     
-    if echo "$content" | grep -Fq "Workstream '$name' stopped."; then
+    if echo "$content" | grep -Fq "Workstream \"$name\" stopped."; then
         echo "STOPPED"
     elif echo "$content" | grep -Ei "Confirm\?|\[y/N\]|\(y/n\)" >/dev/null; then
         echo "INPUT_NEEDED"
@@ -62,16 +63,16 @@ add_workstream() {
 
     local yolo_flag=""
     if [[ "$use_yolo" == "true" ]] || [[ "$YOLO" == "true" ]]; then
-        yolo_flag="--yolo"
+        yolo_flag="--permission-mode bypassPermissions"
     fi
 
     # Check if a window with this name already exists
     if tmux list-windows -t "$SESSION" -F "#W" | grep -qx "$name"; then
-        echo "Workstream '$name' already exists, skipping window creation."
+        echo "Workstream \"$name\" already exists, skipping window creation."
         return
     fi
 
-    echo "Adding workstream '$name' with worktree '$tree' ${yolo_flag}..."
+    echo "Adding workstream \"$name\" with worktree \"$tree\" ${yolo_flag}..."
     win_id=$(tmux new-window -d -t "$SESSION" -n "$name" -P -F "#{window_id}")
     # Tag window with worktree info for the combine command
     tmux set-option -w -t "$win_id" @worktree "$tree"
@@ -79,21 +80,21 @@ add_workstream() {
     # Persistent loop with Resume and Restart options
     local cmd="while true; do \
         if [ -d \".claude/worktrees/$tree\" ]; then \
-            echo \"Worktree '$tree' exists, resuming...\"; \
-            (cd \".claude/worktrees/$tree\" && claude --resume latest $yolo_flag); \
+            echo \"Worktree \"$tree\" exists, resuming...\"; \
+            (cd \".claude/worktrees/$tree\" && claude --continue $yolo_flag); \
         else \
             claude $yolo_flag --worktree \"$tree\" \"$task\"; \
         fi; \
         while true; do \
-            echo \"\nWorkstream '$name' stopped. [ENTER] to Resume, [r] to Restart Original, [q] to Quit\"; \
+            echo -e \"\\nWorkstream \"$name\" stopped. [ENTER] to Resume, [r] to Restart Original, [q] to Quit\"; \
             read -n 1 opt; echo; \
             if [ \"\$opt\" = \"r\" ]; then \
                 break; \
             elif [ \"\$opt\" = \"q\" ]; then \
                 exit 0; \
             else \
-                echo \"Resuming workstream '$name' in .claude/worktrees/$tree...\"; \
-                (cd \".claude/worktrees/$tree\" && claude --resume latest $yolo_flag); \
+                echo \"Resuming workstream \"$name\" in .claude/worktrees/$tree...\"; \
+                (cd \".claude/worktrees/$tree\" && claude --continue $yolo_flag); \
             fi; \
         done; \
     done"
@@ -103,13 +104,13 @@ add_workstream() {
 
 # Watchdog function to be run in background
 watchdog() {
-    echo "Starting claude-mux watchdog for session '$SESSION'..."
+    echo "Starting claude-mux watchdog for session \"$SESSION\"..."
     local last_notified=""
     local all_done_notified="false"
 
     while true; do
         if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-            echo "Session '$SESSION' not found. Exiting watchdog."
+            echo "Session \"$SESSION\" not found. Exiting watchdog."
             exit 0
         fi
 
@@ -122,7 +123,7 @@ watchdog() {
             local name=${win_info#*:}
             
             # Skip non-workstream windows
-            [[ "$name" == "main" || "$name" == "combine" ]] && continue
+            [[ "$name" == "main" || "$name" == "combine" || "$name" == "status" ]] && continue
             
             ((total_workstreams++))
             local status=$(get_status "$idx" "$name")
@@ -171,7 +172,7 @@ case "$1" in
         done
 
         if [[ ! -f "$FILE" ]]; then
-            echo "Error: Configuration file '$FILE' not found."
+            echo "Error: Configuration file \"$FILE\" not found."
             exit 1
         fi
         
@@ -187,7 +188,7 @@ case "$1" in
         tmux new-window -d -t "$SESSION" -n "status" "watch -n 5 claude-mux status"
 
         # Read file lines (format: name:worktree:task)
-        while IFS=':' read -r name tree task; do
+        while IFS=":" read -r name tree task; do
             [[ "$name" =~ ^#.* ]] || [[ -z "$name" ]] && continue
             add_workstream "$name" "$tree" "$task" "$USE_YOLO"
         done < "$FILE"
@@ -212,10 +213,10 @@ case "$1" in
         ;;
     status)
         if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-            echo "Session '$SESSION' not found."
+            echo "Session \"$SESSION\" not found."
             exit 1
         fi
-        echo "Workstream Status for session '$SESSION':"
+        echo "Workstream Status for session \"$SESSION\":"
         printf "%-20s %-15s\n" "WINDOW" "STATUS"
         printf "%-20s %-15s\n" "------" "------"
         
@@ -235,7 +236,7 @@ case "$1" in
             exit 1
         fi
         new_branch=$2
-        echo "Creating new branch '$new_branch' and merging worktrees..."
+        echo "Creating new branch \"$new_branch\" and merging worktrees..."
         
         git checkout -b "$new_branch" || { echo "Failed to create branch. Maybe it already exists?"; exit 1; }
         
@@ -245,7 +246,7 @@ case "$1" in
         for win_info in $windows; do
             idx=${win_info%%:*}
             name=${win_info#*:}
-            [[ "$name" == "main" || "$name" == "combine" ]] && continue
+            [[ "$name" == "main" || "$name" == "combine" || "$name" == "status" ]] && continue
             
             tree=$(tmux show-options -w -v -t "$SESSION:$idx" @worktree 2>/dev/null)
             if [[ -n "$tree" && -d ".claude/worktrees/$tree" ]]; then
@@ -262,8 +263,8 @@ case "$1" in
         fi
         
         for br in $branches_to_merge; do
-            echo "Merging branch '$br'..."
-            git merge "$br" --no-edit || echo "Merge conflict detected with '$br', continuing..."
+            echo "Merging branch \"$br\"..."
+            git merge "$br" --no-edit || echo "Merge conflict detected with \"$br\", continuing..."
         done
         
         echo "Starting Claude session to resolve conflicts, verify integration, and create tests..."
@@ -271,13 +272,42 @@ case "$1" in
         prompt="Review the combined changes from branches:$branches_to_merge. If there are merge conflicts, resolve them carefully to ensure all features work together. Then, run tests, list any integration issues, fix them, and write new tests covering the combined functionality."
         
         # Use -d to prevent immediate switch if we are inside tmux, but then we manually select
-        tmux new-window -d -t "$SESSION" -n "combine" "claude \"$prompt\"; echo 'Combine session finished. Press Enter to close.'; read; exit"
+        tmux new-window -d -t "$SESSION" -n "combine" "claude \"$prompt\"; echo \"Combine session finished. Press Enter to close.\"; read; exit"
         tmux select-window -t "$SESSION:combine"
         
         # Only attach if we are not already inside a tmux session
         if [[ -z "$TMUX" ]]; then
             tmux attach-session -t "$SESSION"
         fi
+        ;;
+    clean)
+        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+            echo "Session \"$SESSION\" not found. Cannot determine worktrees to clean."
+            exit 1
+        fi
+        echo "Cleaning up worktrees and branches for session \"$SESSION\"..."
+        
+        windows=$(tmux list-windows -t "$SESSION" -F "#I:#W")
+        for win_info in $windows; do
+            idx=${win_info%%:*}
+            name=${win_info#*:}
+            [[ "$name" == "main" || "$name" == "combine" || "$name" == "status" ]] && continue
+            
+            tree=$(tmux show-options -w -v -t "$SESSION:$idx" @worktree 2>/dev/null)
+            if [[ -n "$tree" ]]; then
+                echo "Removing worktree and branch for \"$tree\"..."
+                # Extract branch name if it exists in that worktree
+                if [[ -d ".claude/worktrees/$tree" ]]; then
+                    branch=$(git -C ".claude/worktrees/$tree" branch --show-current)
+                    git worktree remove -f ".claude/worktrees/$tree" || true
+                    if [[ -n "$branch" && "$branch" == worktree-* ]]; then
+                        git branch -D "$branch" || true
+                    fi
+                fi
+            fi
+        done
+        rm -rf .claude/worktrees
+        echo "Clean completed."
         ;;
     attach)
         tmux attach-session -t "$SESSION"
